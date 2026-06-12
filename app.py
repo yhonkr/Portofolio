@@ -66,7 +66,6 @@ def get_news():
         })
     return items
 
-
 # ── 5. Yield Optimizer (DefiLlama API — 무료, API 키 불필요)
 @st.cache_data(ttl=1800)
 def get_yield_data():
@@ -98,10 +97,7 @@ def get_yield_data():
                     and 0 < apy < 50
                     and tvl > 10_000_000):
 
-                # ── 리스크 점수 계산 ──
                 risk = 50
-
-                # TVL 기준
                 if tvl > 1_000_000_000:
                     risk -= 25
                 elif tvl > 500_000_000:
@@ -113,13 +109,11 @@ def get_yield_data():
                 else:
                     risk += 10
 
-                # 프로토콜 신뢰도
                 if project in SAFE_PROTOCOLS:
                     risk -= 25
                 else:
                     risk += 20
 
-                # APY 기준
                 if apy > 20:
                     risk += 30
                 elif apy > 12:
@@ -146,12 +140,26 @@ def get_yield_data():
                     "점수":     risk
                 })
 
-        # 🆕 안전 먼저, 그 다음 APY 높은 순
         results.sort(key=lambda x: (x["점수"], -x["APY (%)"]))
         return results[:10]
 
     except Exception:
         return []
+
+# ── 6. 텔레그램 알림 보내기
+def send_telegram(message):
+    try:
+        token   = st.secrets["TELEGRAM_TOKEN"]
+        chat_id = st.secrets["TELEGRAM_CHAT_ID"]
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        requests.post(
+            url,
+            data={"chat_id": chat_id, "text": message},
+            timeout=10
+        )
+        return True
+    except Exception:
+        return False
 
 # ════════════════════════════════════════
 # 화면 구성
@@ -172,17 +180,52 @@ with col3:
 
 st.divider()
 
-# ── 디페그 알림
+# ── 디페그 알림 + 텔레그램 연동
 alerts = check_depeg(prices)
 if alerts:
     for alert in alerts:
         st.error(alert)
+
+    # 세션당 1번만 전송
+    if "telegram_sent" not in st.session_state:
+        st.session_state.telegram_sent = False
+
+    if not st.session_state.telegram_sent:
+        news = get_news()
+        news_line = ""
+        if news:
+            news_line = f"\n📰 관련 뉴스: {news[0]['title']}"
+
+        mensaje = "🚨 디페그 감지!\n"
+        for coin, price in prices.items():
+            if price < 0.99 or price > 1.01:
+                pct = round((price - 1.0) * 100, 2)
+                mensaje += f"\n🪙 {coin} 현재 가격: ${price}"
+                mensaje += f"\n📉 $1 기준 {pct}% 이탈"
+
+        # Yield Optimizer 추천 포함
+        yield_data = get_yield_data()
+        safe = [p for p in yield_data if "🟢" in p["리스크"]]
+        if safe:
+            best = safe[0]
+            mensaje += (
+                f"\n\n💰 추천 이동처:"
+                f"\n→ {best['프로토콜'].upper()} ({best['체인']})"
+                f"\n→ {best['풀']} APY {best['APY (%)']}%"
+            )
+
+        mensaje += news_line
+
+        if send_telegram(mensaje):
+            st.toast("📱 텔레그램 알림 전송 완료!")
+            st.session_state.telegram_sent = True
 else:
     st.success(":white_check_mark: 현재 디페그 없음 — 세 코인 모두 정상입니다")
+    st.session_state.telegram_sent = False
 
 st.divider()
 
-# ── 30일 그래프 (0.98~1.02 범위) — rate limit 보호 포함
+# ── 30일 그래프
 st.subheader(":chart_with_upwards_trend: 30일 가격 추이")
 
 df_usdt = get_history("tether")
@@ -215,7 +258,6 @@ st.caption("출처: DefiLlama API · 순수 스테이블코인 풀만 · 30분�
 yield_data = get_yield_data()
 
 if yield_data:
-    # 디페그 감지와 연동
     if alerts:
         st.warning("⚠️ 디페그 감지됨 — 아래 안전한 풀로 이동을 고려하세요")
 
@@ -233,7 +275,6 @@ if yield_data:
         use_container_width=True
     )
 
-    # 최고 안전 풀 추천
     safe = [p for p in yield_data if "🟢" in p["리스크"]]
     if safe:
         best = safe[0]
@@ -264,6 +305,20 @@ else:
     st.info("뉴스를 불러오는 중입니다...")
 
 st.divider()
+
+# ── 텔레그램 테스트 버튼
+if st.button("📱 텔레그램 테스트 메시지 보내기"):
+    test_msg = (
+        "✅ StableGuard 테스트\n\n"
+        f"🪙 USDT: ${prices['USDT']}\n"
+        f"🪙 USDC: ${prices['USDC']}\n"
+        f"🪙 DAI:  ${prices['DAI']}\n\n"
+        "봇이 정상 작동 중입니다! 🚀"
+    )
+    if send_telegram(test_msg):
+        st.success("✅ 전송 완료! 텔레그램을 확인하세요 📱")
+    else:
+        st.error("❌ 전송 실패 — secrets.toml의 토큰을 확인하세요")
 
 # ── 새로고침 버튼
 if st.button(":arrows_counterclockwise: 지금 다시 확인"):

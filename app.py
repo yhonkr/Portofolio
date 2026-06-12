@@ -66,13 +66,102 @@ def get_news():
         })
     return items
 
-# ── 5. 화면 구성
+
+# ── 5. Yield Optimizer (DefiLlama API — 무료, API 키 불필요)
+@st.cache_data(ttl=1800)
+def get_yield_data():
+    url = "https://yields.llama.fi/pools"
+    try:
+        response = requests.get(url, timeout=15)
+        data = response.json()
+
+        TARGET_SYMBOLS = ["USDT", "USDC", "DAI"]
+        SAFE_PROTOCOLS = [
+            "aave-v3", "aave-v2", "compound-v3", "compound",
+            "curve-dex", "curve", "makerdao", "sparklend",
+            "morpho", "fluid-lending", "fluid-lite",
+            "sky", "sky-savings-rate", "dsr"
+        ]
+
+        results = []
+        for pool in data["data"]:
+            symbol    = pool.get("symbol", "")
+            apy       = pool.get("apy")
+            tvl       = pool.get("tvlUsd", 0)
+            project   = pool.get("project", "")
+            chain     = pool.get("chain", "")
+            is_stable = pool.get("stablecoin", False)
+
+            if (is_stable
+                    and symbol in TARGET_SYMBOLS
+                    and apy is not None
+                    and 0 < apy < 50
+                    and tvl > 10_000_000):
+
+                # ── 리스크 점수 계산 ──
+                risk = 50
+
+                # TVL 기준
+                if tvl > 1_000_000_000:
+                    risk -= 25
+                elif tvl > 500_000_000:
+                    risk -= 20
+                elif tvl > 100_000_000:
+                    risk -= 15
+                elif tvl > 50_000_000:
+                    risk -= 5
+                else:
+                    risk += 10
+
+                # 프로토콜 신뢰도
+                if project in SAFE_PROTOCOLS:
+                    risk -= 25
+                else:
+                    risk += 20
+
+                # APY 기준
+                if apy > 20:
+                    risk += 30
+                elif apy > 12:
+                    risk += 15
+                elif apy > 8:
+                    risk += 5
+
+                risk = max(0, min(100, risk))
+
+                if risk <= 35:
+                    nivel = "🟢 안전"
+                elif risk <= 65:
+                    nivel = "🟡 보통"
+                else:
+                    nivel = "🔴 위험"
+
+                results.append({
+                    "프로토콜":  project,
+                    "체인":     chain,
+                    "풀":       symbol,
+                    "APY (%)":  round(apy, 2),
+                    "TVL ($M)": round(tvl / 1_000_000, 1),
+                    "리스크":   nivel,
+                    "점수":     risk
+                })
+
+        # 🆕 안전 먼저, 그 다음 APY 높은 순
+        results.sort(key=lambda x: (x["점수"], -x["APY (%)"]))
+        return results[:10]
+
+    except Exception:
+        return []
+
+# ════════════════════════════════════════
+# 화면 구성
+# ════════════════════════════════════════
 st.title(":shield: 스테이블코인 디페그 모니터")
 st.caption(f"마지막 업데이트: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
 prices = get_prices()
 
-# 상단 카드 3개
+# ── 상단 카드 3개
 col1, col2, col3 = st.columns(3)
 with col1:
     st.metric("USDT", f"${prices['USDT']}", round(prices['USDT'] - 1.0, 4))
@@ -83,7 +172,7 @@ with col3:
 
 st.divider()
 
-# 디페그 알림
+# ── 디페그 알림
 alerts = check_depeg(prices)
 if alerts:
     for alert in alerts:
@@ -93,29 +182,72 @@ else:
 
 st.divider()
 
-# 30일 그래프 (범위 조정 — 친구 개선 버전)
+# ── 30일 그래프 (0.98~1.02 범위) — rate limit 보호 포함
 st.subheader(":chart_with_upwards_trend: 30일 가격 추이")
 
 df_usdt = get_history("tether")
 df_usdc = get_history("usd-coin")
 df_dai  = get_history("dai")
-df_all  = pd.concat([df_usdt, df_usdc, df_dai], axis=1, sort=False)
-df_all.columns = ["USDT", "USDC", "DAI"]
 
-df_reset = df_all.reset_index()
-df_melt  = df_reset.melt("timestamp", var_name="코인", value_name="가격")
+if not df_usdt.empty and not df_usdc.empty and not df_dai.empty:
+    df_all = pd.concat([df_usdt, df_usdc, df_dai], axis=1, sort=False)
+    df_all.columns = ["USDT", "USDC", "DAI"]
 
-chart = alt.Chart(df_melt).mark_line().encode(
-    x="timestamp:T",
-    y=alt.Y("가격:Q", scale=alt.Scale(domain=[0.98, 1.02])),
-    color="코인:N"
-).properties(height=300)
+    df_reset = df_all.reset_index()
+    df_melt  = df_reset.melt("timestamp", var_name="코인", value_name="가격")
 
-st.altair_chart(chart, use_container_width=True)
+    chart = alt.Chart(df_melt).mark_line().encode(
+        x="timestamp:T",
+        y=alt.Y("가격:Q", scale=alt.Scale(domain=[0.98, 1.02])),
+        color="코인:N"
+    ).properties(height=300)
+
+    st.altair_chart(chart, use_container_width=True)
+else:
+    st.warning("⏳ CoinGecko API 요청 제한 — 1분 후 다시 시도하세요")
 
 st.divider()
 
-# 최신 뉴스
+# ── Yield Optimizer 화면
+st.subheader("💰 수익률 TOP 10 — Yield Optimizer")
+st.caption("출처: DefiLlama API · 순수 스테이블코인 풀만 · 30분마다 갱신")
+
+yield_data = get_yield_data()
+
+if yield_data:
+    # 디페그 감지와 연동
+    if alerts:
+        st.warning("⚠️ 디페그 감지됨 — 아래 안전한 풀로 이동을 고려하세요")
+
+    df_yield = pd.DataFrame(yield_data)
+
+    st.dataframe(
+        df_yield.drop(columns=["점수"]),
+        column_config={
+            "APY (%)":  st.column_config.NumberColumn(
+                            "APY (%)", format="%.2f%%"),
+            "TVL ($M)": st.column_config.NumberColumn(
+                            "TVL ($M)", format="$%.0fM"),
+        },
+        hide_index=True,
+        use_container_width=True
+    )
+
+    # 최고 안전 풀 추천
+    safe = [p for p in yield_data if "🟢" in p["리스크"]]
+    if safe:
+        best = safe[0]
+        st.success(
+            f"✅ 추천: **{best['프로토콜'].upper()}** ({best['체인']}) — "
+            f"{best['풀']} — APY {best['APY (%)']}% — "
+            f"TVL ${best['TVL ($M)']}M"
+        )
+else:
+    st.info("수익률 데이터를 불러오는 중입니다...")
+
+st.divider()
+
+# ── 최신 뉴스
 st.subheader(":newspaper: 스테이블코인 관련 뉴스")
 news_list = get_news()
 
@@ -133,7 +265,7 @@ else:
 
 st.divider()
 
-# 새로고침 버튼
+# ── 새로고침 버튼
 if st.button(":arrows_counterclockwise: 지금 다시 확인"):
     st.cache_data.clear()
     st.rerun()

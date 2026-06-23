@@ -306,21 +306,37 @@ else:
 
 st.divider()
 
-# ── 텔레그램 테스트 버튼
-if st.button("📱 텔레그램 테스트 메시지 보내기"):
-    test_msg = (
-        "✅ StableGuard 테스트\n\n"
-        f"🪙 USDT: ${prices['USDT']}\n"
-        f"🪙 USDC: ${prices['USDC']}\n"
-        f"🪙 DAI:  ${prices['DAI']}\n\n"
-        "봇이 정상 작동 중입니다! 🚀"
-    )
-    if send_telegram(test_msg):
-        st.success("✅ 전송 완료! 텔레그램을 확인하세요 📱")
-    else:
-        st.error("❌ 전송 실패 — secrets.toml의 토큰을 확인하세요")
+# ── 자동 모니터링 설정
+st.divider()
+st.subheader("⚙️ 자동 모니터링 설정")
 
-# ── 새로고침 버튼
-if st.button(":arrows_counterclockwise: 지금 다시 확인"):
+col1, col2 = st.columns([3, 1])
+with col1:
+    intervalo = st.slider(
+        "새로고침 간격 (초)",
+        min_value=30,
+        max_value=300,
+        value=60,
+        step=30
+    )
+with col2:
+    auto_on = st.toggle("자동 실행", value=True)
+
+# 상태 표시
+if auto_on:
+    st.caption(f"🟢 자동 모니터링 중 — {intervalo}초마다 확인")
+else:
+    st.caption("🔴 자동 모니터링 꺼짐")
+
+# 수동 새로고침 버튼
+if st.button(":arrows_counterclockwise: 지금 바로 확인"):
+    st.cache_data.clear()
+    st.rerun()
+
+# ── 자동 루프 (핵심)
+import time
+
+if auto_on:
+    time.sleep(intervalo)
     st.cache_data.clear()
     st.rerun()

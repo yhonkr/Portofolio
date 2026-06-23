@@ -1,3 +1,4 @@
+import time
 import requests
 import feedparser
 import pandas as pd
@@ -23,12 +24,25 @@ def get_prices():
     except Exception:
         return {"USDT": 1.0, "USDC": 1.0, "DAI": 1.0}
 
-# ── 2. 디페그 감지
+# ── 2. 디페그 감지 (0.998부터 감지 — 매우 민감)
 def check_depeg(prices):
     alerts = []
     for coin, price in prices.items():
-        if price < 0.99 or price > 1.01:
-            alerts.append(f":warning: {coin} 디페그! 현재 가격: ${price}")
+        if price < 0.998 or price > 1.002:
+            # 심각도 레벨
+            if price < 0.990 or price > 1.010:
+                nivel = "🚨 위험"
+            elif price < 0.995 or price > 1.005:
+                nivel = "🔴 경고"
+            else:
+                nivel = "⚠️ 주의"
+            pct = round((price - 1.0) * 100, 3)
+            alerts.append({
+                "coin":   coin,
+                "price":  price,
+                "pct":    pct,
+                "nivel":  nivel
+            })
     return alerts
 
 # ── 3. 30일 과거 데이터
@@ -66,7 +80,7 @@ def get_news():
         })
     return items
 
-# ── 5. Yield Optimizer (DefiLlama API — 무료, API 키 불필요)
+# ── 5. Yield Optimizer (DefiLlama API)
 @st.cache_data(ttl=1800)
 def get_yield_data():
     url = "https://yields.llama.fi/pools"
@@ -98,37 +112,24 @@ def get_yield_data():
                     and tvl > 10_000_000):
 
                 risk = 50
-                if tvl > 1_000_000_000:
-                    risk -= 25
-                elif tvl > 500_000_000:
-                    risk -= 20
-                elif tvl > 100_000_000:
-                    risk -= 15
-                elif tvl > 50_000_000:
-                    risk -= 5
-                else:
-                    risk += 10
+                if tvl > 1_000_000_000:    risk -= 25
+                elif tvl > 500_000_000:    risk -= 20
+                elif tvl > 100_000_000:    risk -= 15
+                elif tvl > 50_000_000:     risk -= 5
+                else:                      risk += 10
 
-                if project in SAFE_PROTOCOLS:
-                    risk -= 25
-                else:
-                    risk += 20
+                if project in SAFE_PROTOCOLS: risk -= 25
+                else:                         risk += 20
 
-                if apy > 20:
-                    risk += 30
-                elif apy > 12:
-                    risk += 15
-                elif apy > 8:
-                    risk += 5
+                if apy > 20:    risk += 30
+                elif apy > 12:  risk += 15
+                elif apy > 8:   risk += 5
 
                 risk = max(0, min(100, risk))
 
-                if risk <= 35:
-                    nivel = "🟢 안전"
-                elif risk <= 65:
-                    nivel = "🟡 보통"
-                else:
-                    nivel = "🔴 위험"
+                if risk <= 35:    nivel = "🟢 안전"
+                elif risk <= 65:  nivel = "🟡 보통"
+                else:             nivel = "🔴 위험"
 
                 results.append({
                     "프로토콜":  project,
@@ -146,7 +147,7 @@ def get_yield_data():
     except Exception:
         return []
 
-# ── 6. 텔레그램 알림 보내기
+# ── 6. 텔레그램 알림
 def send_telegram(message):
     try:
         token   = st.secrets["TELEGRAM_TOKEN"]
@@ -160,6 +161,33 @@ def send_telegram(message):
         return True
     except Exception:
         return False
+
+# ── 7. 텔레그램 메시지 생성
+def build_telegram_message(alerts, prices, yield_data, news):
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    msg = f"⚠️ 스테이블코인 이상 감지!\n🕐 {now}\n"
+    msg += "─────────────────────\n"
+
+    for a in alerts:
+        msg += f"\n{a['nivel']} {a['coin']}"
+        msg += f"\n💵 현재가: ${a['price']}"
+        msg += f"\n📉 변동: {a['pct']}%\n"
+
+    # 안전 풀 추천
+    safe = [p for p in yield_data if "🟢" in p["리스크"]]
+    if safe:
+        best = safe[0]
+        msg += "\n─────────────────────"
+        msg += "\n💰 추천 이동처:"
+        msg += f"\n→ {best['프로토콜'].upper()} ({best['체인']})"
+        msg += f"\n→ {best['풀']} APY {best['APY (%)']}%"
+
+    # 관련 뉴스 1개
+    if news:
+        msg += "\n─────────────────────"
+        msg += f"\n📰 {news[0]['title']}"
+
+    return msg
 
 # ════════════════════════════════════════
 # 화면 구성
@@ -180,48 +208,36 @@ with col3:
 
 st.divider()
 
-# ── 디페그 알림 + 텔레그램 연동
+# ── 디페그 알림 + 텔레그램 자동 전송
 alerts = check_depeg(prices)
+
+# session_state 초기화
+if "telegram_sent" not in st.session_state:
+    st.session_state.telegram_sent = set()  # 이미 알림 보낸 코인 집합
+
 if alerts:
-    for alert in alerts:
-        st.error(alert)
+    for a in alerts:
+        if a["nivel"] == "🚨 위험":
+            st.error(f"{a['nivel']} {a['coin']} — ${a['price']} ({a['pct']}%)")
+        elif a["nivel"] == "🔴 경고":
+            st.warning(f"{a['nivel']} {a['coin']} — ${a['price']} ({a['pct']}%)")
+        else:
+            st.info(f"{a['nivel']} {a['coin']} — ${a['price']} ({a['pct']}%)")
 
-    # 세션당 1번만 전송
-    if "telegram_sent" not in st.session_state:
-        st.session_state.telegram_sent = False
-
-    if not st.session_state.telegram_sent:
-        news = get_news()
-        news_line = ""
-        if news:
-            news_line = f"\n📰 관련 뉴스: {news[0]['title']}"
-
-        mensaje = "🚨 디페그 감지!\n"
-        for coin, price in prices.items():
-            if price < 0.99 or price > 1.01:
-                pct = round((price - 1.0) * 100, 2)
-                mensaje += f"\n🪙 {coin} 현재 가격: ${price}"
-                mensaje += f"\n📉 $1 기준 {pct}% 이탈"
-
-        # Yield Optimizer 추천 포함
-        yield_data = get_yield_data()
-        safe = [p for p in yield_data if "🟢" in p["리스크"]]
-        if safe:
-            best = safe[0]
-            mensaje += (
-                f"\n\n💰 추천 이동처:"
-                f"\n→ {best['프로토콜'].upper()} ({best['체인']})"
-                f"\n→ {best['풀']} APY {best['APY (%)']}%"
-            )
-
-        mensaje += news_line
-
-        if send_telegram(mensaje):
-            st.toast("📱 텔레그램 알림 전송 완료!")
-            st.session_state.telegram_sent = True
+        # 코인별로 1번만 전송
+        if a["coin"] not in st.session_state.telegram_sent:
+            yield_data_tg = get_yield_data()
+            news_tg       = get_news()
+            msg = build_telegram_message(alerts, prices, yield_data_tg, news_tg)
+            if send_telegram(msg):
+                st.session_state.telegram_sent.add(a["coin"])
+                st.toast(f"📱 {a['coin']} 텔레그램 알림 전송!")
 else:
-    st.success(":white_check_mark: 현재 디페그 없음 — 세 코인 모두 정상입니다")
-    st.session_state.telegram_sent = False
+    st.success(":white_check_mark: 현재 이상 없음 — 세 코인 모두 정상입니다")
+    # 정상으로 돌아오면 해당 코인 초기화 (다음 디페그에 다시 알림 가능)
+    for coin in list(st.session_state.telegram_sent):
+        if prices.get(coin, 1.0) >= 0.998:
+            st.session_state.telegram_sent.discard(coin)
 
 st.divider()
 
@@ -251,7 +267,7 @@ else:
 
 st.divider()
 
-# ── Yield Optimizer 화면
+# ── Yield Optimizer
 st.subheader("💰 수익률 TOP 10 — Yield Optimizer")
 st.caption("출처: DefiLlama API · 순수 스테이블코인 풀만 · 30분마다 갱신")
 
@@ -259,10 +275,9 @@ yield_data = get_yield_data()
 
 if yield_data:
     if alerts:
-        st.warning("⚠️ 디페그 감지됨 — 아래 안전한 풀로 이동을 고려하세요")
+        st.warning("⚠️ 이상 감지됨 — 아래 안전한 풀로 이동을 고려하세요")
 
     df_yield = pd.DataFrame(yield_data)
-
     st.dataframe(
         df_yield.drop(columns=["점수"]),
         column_config={
@@ -307,7 +322,6 @@ else:
 st.divider()
 
 # ── 자동 모니터링 설정
-st.divider()
 st.subheader("⚙️ 자동 모니터링 설정")
 
 col1, col2 = st.columns([3, 1])
@@ -322,20 +336,16 @@ with col1:
 with col2:
     auto_on = st.toggle("자동 실행", value=True)
 
-# 상태 표시
 if auto_on:
-    st.caption(f"🟢 자동 모니터링 중 — {intervalo}초마다 확인")
+    st.caption(f"🟢 자동 모니터링 중 — {intervalo}초마다 확인 · 감지 기준: $0.998")
 else:
     st.caption("🔴 자동 모니터링 꺼짐")
 
-# 수동 새로고침 버튼
 if st.button(":arrows_counterclockwise: 지금 바로 확인"):
     st.cache_data.clear()
     st.rerun()
 
-# ── 자동 루프 (핵심)
-import time
-
+# ── 자동 루프
 if auto_on:
     time.sleep(intervalo)
     st.cache_data.clear()
